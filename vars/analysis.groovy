@@ -17,10 +17,61 @@
  *  This file is part of Mbed TLS (https://www.trustedfirmware.org/projects/mbed-tls/)
  */
 
+import java.util.concurrent.Callable
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentMap
+
 import groovy.transform.Field
+
+import org.mbed.tls.jenkins.JobTimestamps
 
 // A static field has its content preserved across stages.
 @Field static outcome_stashes = []
+
+@Field private static ConcurrentMap<String, JobTimestamps> timestamps = new ConcurrentHashMap<String, JobTimestamps>();
+
+void record_timestamps(String group, String name, Callable<Void> body, String node_label = null) {
+    def ts = new JobTimestamps(group, name)
+    if (timestamps.putIfAbsent(name, ts) != null) {
+        throw new IllegalArgumentException("Job name '$name' used multiple times.")
+    }
+
+    try {
+        def stamped_body = {
+            ts.start = System.currentTimeMillis()
+            body()
+        }
+        if (node_label != null) {
+            node(node_label, stamped_body)
+        } else {
+            stamped_body()
+        }
+    } finally {
+        ts.end = System.currentTimeMillis()
+    }
+}
+
+void node_record_timestamps(String node_label, String job_name, Callable<Void> body) {
+    record_timestamps(node_label, job_name, body, node_label)
+}
+
+void record_inner_timestamps(String job_name, Callable<Void> body) {
+    def ts = timestamps[job_name]
+    if (ts == null) {
+        throw new NoSuchElementException(job_name)
+    }
+    ts.innerStart = System.currentTimeMillis()
+    try {
+        body()
+    } finally {
+        ts.innerEnd = System.currentTimeMillis()
+    }
+}
+
+void print_timestamps() {
+    writeFile(file: 'timestamps.csv', text: timestamps.values().collect({ts -> ts.CSV}).sort().join('\r\n'))
+    archiveArtifacts(artifacts: 'timestamps.csv')
+}
 
 def stash_outcomes(job_name) {
     def stash_name = job_name + '-outcome'
@@ -77,21 +128,22 @@ def gather_outcomes() {
     if (outcome_stashes.isEmpty()) {
         return
     }
-    node('helper-container-host') {
-        dir('outcomes') {
+    dir('outcomes') {
+        deleteDir()
+        try {
+            checkout_repo.checkout_repo()
+            process_outcomes()
+        } finally {
             deleteDir()
-            try {
-                checkout_repo.checkout_repo()
-                process_outcomes()
-            } finally {
-                deleteDir()
-            }
         }
     }
 }
 
 def analyze_results() {
-    gather_outcomes()
+    node('helper-container-host') {
+        gather_outcomes()
+        print_timestamps()
+    }
 }
 
 def analyze_results_and_notify_github() {

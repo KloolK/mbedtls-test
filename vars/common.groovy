@@ -107,9 +107,9 @@ def get_docker_tag(platform) {
 
 def init_docker_images() {
     stage('init-docker-images') {
-        def jobs = linux_platforms.collectEntries {
+        def jobs = mbedtls.wrap_report_errors(linux_platforms.collectEntries {
             platform -> gen_jobs.gen_dockerfile_builder_job(platform)
-        }
+        })
         jobs.failFast = false
         parallel jobs
     }
